@@ -4,7 +4,7 @@ This is very much a hackjob just to get the data out - this car is probably goin
 
 This should all be split up using the "packages:" functionality to make the source modular - but I just recently learned about this in ESPhome and have not implemented it yet. 
 
-I was originally going to use the Waveshare 480x480 LCD with built in CAN - but had all sorts of trouble getting the CAN to work. I may have friend the CAN hardware - or it just does not work with the GPIO0 the designers chose to use! So I moved that pin to GPIO 4 which is the SD MISO pin but I am not using the SD card right now. Then it finally worked!!! 
+I was originally going to use the Waveshare 480x480 LCD with built in CAN - but had all sorts of trouble getting the CAN to work. I may have fried the CAN hardware - or it just does not work with the GPIO0 the designers chose to use! So I moved that pin to GPIO 4 which is the SD MISO pin but I am not using the SD card right now. Then it finally worked!!! 
 
 But I decided to switch to the Guition 320x480 display because it fits nicely on the dashboard of this particular car next to the original dashboard... 
 
