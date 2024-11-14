@@ -1,0 +1,611 @@
+# hardware: Waveshare 4" 480x480 LCD with CAN + RS485 onboard
+
+esphome:
+  name: byd-e6-car-ws480
+  friendly_name: BYD-E6-CAR-WS480
+  platformio_options:
+    board_build.flash_mode: dio # Standard uses a single line for data, Dual IO uses 2 lines for data (prevent reboot loop)
+  on_boot:
+    - priority: -100.0 
+      then:
+        - canbus.send: !lambda return {0x02, 0x10, 0x01, 0x55, 0x55, 0x55, 0x55, 0x55}; // init for BMS data
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      COMPILER_OPTIMIZATION_SIZE: "y"
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_COMPILER_OPTIMIZATION_PERF: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+      CONFIG_SPIRAM_RODATA: "y"
+
+preferences:
+  flash_write_interval: 1min      
+
+psram:
+  mode: octal
+  speed: 80MHz #cant go faster than 80 will revert to 40
+
+# Enable logging
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: INFO
+  #logs:
+     #component: VERBOSE
+     #scheduler: DEBUG
+     #wifi: DEBUG
+     #light: DEBUG
+     #esp32_rmt_led_strip: DEBUG
+     #esp32.preferences: DEBUG
+     #canbus: INFO
+
+# Enable Home Assistant API
+api:
+  reboot_timeout: 0s #disable auto 15min reboot with no HA connection - in car this wont be connected
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  reboot_timeout: 0s #disable reboot if no wifi - Defaults to 15min. Does not apply when in access point mode.
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Byd-E6-Car-WS480 Fallback"
+    password: "fallback"
+
+captive_portal:
+
+time:
+  - platform: homeassistant
+    id: ha_time
+    on_time_sync:
+      - if:
+          condition:
+            lambda: 'return id(device_last_restart).state == "";'
+          then:
+            - text_sensor.template.publish:
+                id: device_last_restart
+                state: !lambda 'return id(sntp_time).now().strftime("%a %d %b %Y - %I:%M:%S %p");'
+  - platform: pcf85063
+    id: pcf85063_time
+#-------------------------------------------
+# Touchscreen gt911 i2c
+#-------------------------------------------
+i2c:
+  - id: bus_a
+    sda: GPIO15
+    scl: GPIO7
+    
+touchscreen:
+  platform: gt911
+  transform:
+    mirror_x: false
+    mirror_y: false
+  id: my_touchscreen
+  display: my_display
+  on_touch:
+    then:
+      lvgl.page.next:
+
+#-------------------------------------------
+# Display st7701s spi
+#-------------------------------------------
+spi:
+  - id: lcd_spi
+    clk_pin: GPIO2
+    mosi_pin: GPIO1
+
+globals:
+  - id: can_frame_index_1s
+    type: int
+    restore_value: no
+    initial_value: '-1'
+  - id: can_frame_index_fast
+    type: int
+    restore_value: no
+    initial_value: '-1'
+
+interval: 
+  - interval: 60s
+    then:
+      - canbus.send: !lambda return {0x02, 0x10, 0x01, 0x55, 0x55, 0x55, 0x55, 0x55}; // init for BMS data
+  - interval: 1s
+    then:
+      #- canbus.send: !lambda return {0x03, 0x22, 0x0, 0x04, 0x55, 0x55, 0x55, 0x55};
+      - canbus.send:
+          canbus_id: can1
+          can_id: 0x781
+          data: !lambda |-
+            int index = id(can_frame_index_1s);
+            int max_index = 9;     
+            if (index >= max_index) index = 0;
+            else index++;     
+            id(can_frame_index_1s) = index;
+
+            std::vector<uint8_t> can_data(8, 0x00);  // Initialize with 8 zeros
+            switch (index)
+            {
+              case 0:
+                can_data = {0x03, 0x22, 0x00, 0x04, 0x55, 0x55, 0x55, 0x55}; // request pack voltage
+                break;
+              case 1:
+                can_data = {0x03, 0x22, 0x00, 0x05, 0x55, 0x55, 0x55, 0x55}; // request pack amps
+                break;
+              case 02:
+                can_data = {0x03, 0x22, 0x00, 0x06, 0x55, 0x55, 0x55, 0x55}; // request pack health index
+                break;
+              case 3:
+                can_data = {0x03, 0x22, 0x00, 0x07, 0x55, 0x55, 0x55, 0x55}; // request pack SOC
+                break;
+              case 4:
+                can_data = {0x03, 0x22, 0x00, 0x08, 0x55, 0x55, 0x55, 0x55}; // request pack temperature max
+                break;
+              case 5:
+                can_data = {0x03, 0x22, 0x00, 0x13, 0x55, 0x55, 0x55, 0x55}; // request voltage cell min number
+                break;
+              case 6:
+                can_data = {0x03, 0x22, 0x00, 0x14, 0x55, 0x55, 0x55, 0x55}; // request voltage cell min
+                break;
+              case 7:
+                can_data = {0x03, 0x22, 0x00, 0x15, 0x55, 0x55, 0x55, 0x55}; // request voltage cell max number
+                break;
+              case 8:
+                can_data = {0x03, 0x22, 0x00, 0x16, 0x55, 0x55, 0x55, 0x55}; // request voltage cell max
+                break;
+            }
+            return can_data;
+
+  - interval: 100ms
+    then:
+      - canbus.send:
+          canbus_id: can1
+          can_id: 0x781
+          data: !lambda |-
+            int index = id(can_frame_index_fast);
+            int max_index = 2;     
+            if (index >= max_index) index = 0;
+            else index++;     
+            id(can_frame_index_fast) = index;
+
+            std::vector<uint8_t> can_data(8, 0x00);  // Initialize with 8 zeros
+            switch (index)
+            {
+              case 0:
+                can_data = {0x03, 0x22, 0x00, 0x04, 0x55, 0x55, 0x55, 0x55}; // request pack voltage
+                break;
+              case 1:
+                can_data = {0x03, 0x22, 0x00, 0x05, 0x55, 0x55, 0x55, 0x55}; // request pack amps
+                break;
+            }
+            return can_data;
+
+canbus:
+  - platform: esp32_can
+    id: can1
+    tx_pin: 6 # default is 6
+    rx_pin: 4 # hacked to SD bus MISO pin - default is 0
+    can_id: 0x781 # default CAN ID used for transmitting frames.
+    bit_rate: 250KBPS
+    on_frame:
+      - can_id: 0x781 # data request
+        then:
+          - lambda: |-
+              ESP_LOGI("canbus", "can_id: 0x%03x, length: %d, content: %s", can_id, x.size(), format_hex_pretty(x).c_str());          
+
+      - can_id: 0x789 # data received
+        then:
+          - lambda: |-
+              ESP_LOGI("canbus", "can_id: 0x%03x, length: %d, content: %s", can_id, x.size(), format_hex_pretty(x).c_str());
+
+              float value = 0;
+              char status_type = x[3];
+              ESP_LOGI("status_type", "%x", status_type);
+              switch (status_type)
+              {
+                case 0x04:
+                  value = (x[5]<<8) | (x[4]); //combine bytes into full value
+                  ESP_LOGI("canbus", "Battery Pack Full Voltage: %.02fV", value);
+                  id(bms_packvoltage).publish_state(value);
+                  break;
+
+                case 0x05:
+                  value = float(((x[5]<<8) | (x[4])) - 5000) / 10 ;
+                  ESP_LOGI("canbus", "Battery Pack Full Current: %.02fA", value);
+                  id(bms_packcurrent).publish_state(value);
+                  id(bms_packpower).publish_state(value * id(bms_packvoltage).state); //calculate pack power
+                  break;
+
+                case 0x06:
+                  value = x[4];
+                  ESP_LOGI("canbus", "Health Index: %.02f%%", value);
+                  id(bms_healthindex).publish_state(value);
+                  break;
+
+                case 0x07:
+                  value = x[4];
+                  ESP_LOGI("canbus", "SOC: %.02f%%", value);
+                  id(bms_soc).publish_state(value);
+                  break;
+
+                case 0x08:
+                  value = x[4] - 40;
+                  ESP_LOGI("canbus", "Pack Temperature Max: %.02fC", value);
+                  id(bms_pack_temperature_max).publish_state(value);
+                  break;
+
+                case 0x13:
+                  value = x[4];
+                  ESP_LOGI("canbus", "Voltage Cell Lowest Number: %.0f", value);
+                  id(bms_voltagecelllowestnumber).publish_state(value);
+                  break;
+
+                case 0x14:
+                  value = float((x[5]<<8) | (x[4])) / 100 ;
+                  ESP_LOGI("canbus", "Voltage Cell Min: %.02fV", value);
+                  id(bms_voltagecellmin).publish_state(value);
+                  break;
+
+                case 0x15:
+                  value = x[4];
+                  ESP_LOGI("canbus", "Voltage Cell Highest Number: %.0f", value);
+                  id(bms_voltagecellhighestnumber).publish_state(value);
+                  break;
+
+                case 0x16:
+                  value = float((x[5]<<8) | (x[4])) / 100 ;
+                  ESP_LOGI("canbus", "Voltage Cell Max: %.02fV", value);
+                  id(bms_voltagecellmax).publish_state(value);
+                  break;
+              }
+          
+
+sensor:
+
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: wifi_signal_db
+    update_interval: 60s
+    entity_category: diagnostic
+    internal: true
+
+  # Reports the WiFi signal strength in %
+  - platform: copy
+    source_id: wifi_signal_db
+    name: "WiFi Strength"
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+    unit_of_measurement: "%"
+    entity_category: diagnostic
+
+  - platform: uptime
+    id: uptime_counter
+    update_interval: 1s
+    accuracy_decimals: 0
+    on_raw_value:
+      then:
+        - number.increment:
+            id: uptime_number
+            cycle: True
+        - script.execute: update_display
+
+  - platform: template
+    name: BMS_PackVoltage
+    id: bms_packvoltage
+    accuracy_decimals: 0
+    device_class: voltage
+    unit_of_measurement: "V"
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: label_voltage
+            text:
+              format: "%.0fV"
+              args: x
+
+  - platform: template
+    name: BMS_PackCurrent
+    id: bms_packcurrent
+    accuracy_decimals: 1
+    device_class: current
+    unit_of_measurement: "A"
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: label_current
+            text:
+              format: "%.1fA"
+              args: x
+
+  - platform: template
+    name: BMS_HealthIndex
+    id: bms_healthindex
+    accuracy_decimals: 2
+    unit_of_measurement: "%"
+
+  - platform: template
+    name: BMS_SOC
+    id: bms_soc
+    accuracy_decimals: 2
+    unit_of_measurement: "%"
+
+  - platform: template
+    name: BMS_PackTemperatureMax
+    id: bms_pack_temperature_max
+    accuracy_decimals: 0
+    device_class: temperature
+    unit_of_measurement: "C"
+
+  - platform: template
+    name: BMS_VoltageCellLowestNumber
+    id: bms_voltagecelllowestnumber
+    accuracy_decimals: 0
+
+  - platform: template
+    name: BMS_VoltageCellMin
+    id: bms_voltagecellmin
+    accuracy_decimals: 2
+    device_class: voltage
+    unit_of_measurement: "V"
+
+  - platform: template
+    name: BMS_VoltageCellHighestNumber
+    id: bms_voltagecellhighestnumber
+    accuracy_decimals: 0
+
+  - platform: template
+    name: BMS_VoltageCellMax
+    id: bms_voltagecellmax
+    accuracy_decimals: 2
+    device_class: voltage
+    unit_of_measurement: "V"
+
+  - platform: template
+    name: BMS_PackPower
+    id: bms_packpower
+    accuracy_decimals: 2
+    device_class: power
+    unit_of_measurement: "W"
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: label_power
+            text:
+              format: "%.0fW"
+              args: x
+        - lvgl.bar.update:
+            id: bar_power
+            value: !lambda 'return float(x);'
+
+  - platform: total_daily_energy
+    name: 'Pack Energy Daily'
+    power_id: bms_packpower
+    unit_of_measurement: 'kWh'
+    state_class: total_increasing
+    device_class: energy
+    restore: true
+    accuracy_decimals: 3
+    filters:
+      # Multiplication factor from W to kW is 0.001
+      - multiply: 0.001
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: label_energy
+            text:
+              format: "%.3fkWh"
+              args: x
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+      entity_category: diagnostic
+    ssid:
+      name: "Connected SSID"
+      entity_category: diagnostic
+    mac_address:
+      name: "Mac Address"
+      entity_category: diagnostic
+  - platform: template
+    name: 'Last Restart'
+    id: device_last_restart
+    icon: mdi:clock
+    entity_category: diagnostic
+
+number:
+  - platform: template
+    initial_value: 0
+    id: uptime_number
+    #internal: True
+    step: 1
+    optimistic: True
+    max_value: 99999999
+    min_value: 0
+
+binary_sensor:
+  - platform: status
+    # name: "Node Status" do not publish
+    id: system_status     
+
+display:
+  - platform: st7701s
+    id: my_display
+    #show_test_card: true 
+    update_interval: never #comment out if using test card option
+    auto_clear_enabled: False
+    spi_mode: MODE3
+    data_rate: 2MHz
+    color_order: RGB
+    invert_colors: True
+    dimensions:
+      width: 480
+      height: 480
+    cs_pin: 42
+    de_pin: 40
+    hsync_pin: 38
+    vsync_pin: 39
+    pclk_pin: 41
+    pclk_frequency: 12MHz
+    pclk_inverted: False
+    #hsync_pulse_width: 8
+    #hsync_front_porch: 10
+    #hsync_back_porch: 20
+    #vsync_pulse_width: 8
+    #vsync_front_porch: 10
+    #vsync_back_porch: 10
+    init_sequence:
+      - 1 # default canned init sequence 
+      # Custom sequences are an array, first byte is command, the rest are data.
+      #- [ 0xFF, 0x77, 0x01, 0x00, 0x00, 0x10 ] # CMD2_BKSEL_BK0
+      #- [ 0xCD, 0x00 ] # disable MDT flag
+      - [ 0xFF, 0x77, 0x01, 0x00, 0x00, 0x00 ] #  in waveshare example at end - only differences
+      - [ 0x36, 0x00, 0x3A, 0x66 ] # ??
+      - [ 0x21 ]
+      #- delay 120 #delay needs newest dev version to be supported
+      - [ 0x29 ]
+    data_pins:
+      red:
+        - 46        #r1
+        - 3        #r2
+        - 8        #r3
+        - 18        #r4
+        - 17         #r5
+      green:
+        - 14         #g0
+        - 13        #g1
+        - 12         #g2
+        - 11        #g3
+        - 10         #g4
+        - 9        #g5
+      blue:
+        - 5         #b1
+        - 45         #b2
+        - 48         #b3
+        - 47         #b4
+        - 21        #b5
+
+lvgl:
+    touchscreens: my_touchscreen
+    log_level: INFO
+    color_depth: 16
+    bg_color: 0
+    border_width: 0
+    outline_width: 0
+    #shadow_width: 0
+    text_font: unscii_16
+    align: center
+    style_definitions:
+      - id: font_style
+        text_font: MONTSERRAT_28
+        #text_font: unscii_16
+        align: center
+        text_color: 0xFFFFFF
+        #bg_opa: cover
+        bg_opa: TRANSP
+        bg_color: 0
+        radius: 4
+        pad_all: 2 
+      - id: details_style
+        text_font: MONTSERRAT_16
+        align: center
+        text_color: 0xFFFFFF
+        #bg_opa: cover
+        bg_opa: TRANSP
+        bg_color: 0
+        radius: 4
+        pad_all: 2 
+    page_wrap: true
+    pages:
+      - id: main_page
+        widgets:
+          - obj: # abitrary
+              height: 480 # needed to be explicitily defined for my round display to not have weird border line overlapping gauge
+              width: 480
+              align: center
+              bg_color: 0
+              #bg_opa: TRANSP
+              border_width: 0
+              outline_width: 0
+              #shadow_width: 0
+              pad_all: 0
+              scrollbar_mode: "off"
+              clip_corner: true
+              radius: 120
+              widgets:
+                - label:
+                    styles: font_style
+                    id: label_uptime
+                    y: -80 #negative = higher
+                - label:
+                    styles: font_style
+                    id: label_voltage
+                    y: -40 #negative = higher
+                - label:
+                    styles: font_style
+                    id: label_current
+                    y: 0 #negative = higher
+                - label:
+                    styles: font_style
+                    id: label_power
+                    y: 40 #negative = higher
+                - label:
+                    styles: font_style
+                    id: label_energy
+                    y: 80 #negative = higher
+                - bar:
+                    x: 10 # distance from top left to top left of item
+                    y: 100 
+                    width: 460 # leave 10 pixel gap left and right
+                    height: 30
+                    bg_color: green
+                    radius: 0
+                    id: bar_power
+                    value: 75
+                    min_value: 0
+                    max_value: 50000
+                    indicator:
+                      radius: 0
+                      bg_color: 0x00FF00
+      - id: settings_page
+        widgets:
+          - obj: # abitrary
+              height: 480 # needed to be explicitily defined for my round display to not have weird border line overlapping gauge
+              width: 480
+              align: center
+              bg_color: 0
+              #bg_opa: TRANSP
+              border_width: 0
+              outline_width: 0
+              #shadow_width: 0
+              pad_all: 0
+              scrollbar_mode: "off"
+              clip_corner: true
+              radius: 120
+              widgets:
+                - label:
+                    styles: font_style
+                    id: label_settings
+                    text: "Settings Page"
+                    y: -220 #negative = higher
+
+
+script:
+  - id: update_display
+    then:
+      - lvgl.label.update:
+          id: label_uptime
+          text:
+            format: "%.0fs"
+            args: [ 'id(uptime_number).state' ]
